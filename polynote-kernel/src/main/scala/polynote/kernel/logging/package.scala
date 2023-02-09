@@ -18,6 +18,16 @@ package object logging {
       blocking: Blocking.Service => new Logging.Service.Default(System.err, blocking)
     }
 
+    object Verbosity extends Enumeration {
+      type Verbosity = VerbosityLevel
+      val Debug, Info, Error = VerbosityLevel
+
+      def getVerbosityFromString(verbosity: String): Option[Verbosity] = {
+        values.find(_.toString.toLowerCase == verbosity.toLowerCase)
+      }
+    }
+    import Verbosity._
+
     trait Service {
       def error(msg: String)(implicit location: Location): UIO[Unit]
       def error(msg: Option[String], err: Throwable)(implicit location: Location): UIO[Unit]
@@ -28,6 +38,7 @@ package object logging {
       def warnSync(msg: String)(implicit location: Location): Unit
       def info(msg: String)(implicit location: Location): UIO[Unit]
       def remote(path: String, msg: String): UIO[Unit]
+      def setVerbosity(verbosity: Verbosity): Unit
     }
 
     object Service {
@@ -43,24 +54,27 @@ package object logging {
         private val infoIndent =   "   |     "
         private val warnPrefix =   "[WARN]   "
         private val warnIndent = infoIndent
+        private val verbosity = Warn
 
         override def error(msg: String)(implicit location: Location): UIO[Unit] = blocking.effectBlocking {
           out.synchronized {
-            lastRemote.lazySet(null)
-            val lines = new StringOps(msg).lines
-            out.print(Red)
-            out.print(errorPrefix)
-            if (location.file != "") {
-              out.println(s"(Logged from ${location.file}:${location.line})")
+            if (Verbosity.Error >= verbosity) {
+              lastRemote.lazySet(null)
+              val lines = new StringOps(msg).lines
+              out.print(Red)
               out.print(errorPrefix)
+              if (location.file != "") {
+                out.println(s"(Logged from ${location.file}:${location.line})")
+                out.print(errorPrefix)
+              }
+              out.println(lines.next())
+              lines.foreach {
+                l =>
+                  out.print(errorIndent)
+                  out.println(l)
+              }
+              out.print(Reset)
             }
-            out.println(lines.next())
-            lines.foreach {
-              l =>
-                out.print(errorIndent)
-                out.println(l)
-            }
-            out.print(Reset)
           }
         }.ignore
 
@@ -83,39 +97,47 @@ package object logging {
         }
 
         override def errorSync(msg: Option[String], err: Throwable)(implicit location: Location): Unit =
-          logStackTraceSync(msg, err, errorPrefix, errorIndent, Red)
+          {
+            if (Verbosity.Error >= verbosity) {
+              logStackTraceSync(msg, err, errorPrefix, errorIndent, Red)
+            }
+          }
 
         override def error(msg: Option[String], err: Throwable)(implicit location: Location): UIO[Unit] = blocking.effectBlocking {
           out.synchronized {
-            lastRemote.lazySet(null)
-            errorSync(msg, err)
+            if (Verbosity.Error >= verbosity) {
+              lastRemote.lazySet(null)
+              errorSync(msg, err)
+            }
           }
         }.ignore
 
         override def error(msg: Option[String], err: zio.Cause[Throwable])(implicit location: Location): UIO[Unit] = blocking.effectBlocking {
           out.synchronized {
-            lastRemote.lazySet(null)
-            out.print(Red)
-            out.print(errorPrefix)
-            msg.foreach(out.print)
-            if (location.file != "")
-              out.println(s" (Logged from ${location.file}:${location.line})")
-            else
-              out.println("")
-            out.print(errorIndent)
-            val squashed = err.squash
-            out.println(squashed)
-            squashed.getStackTrace.foreach {
-              el =>
-                out.print(errorIndent)
-                out.println(el)
+            if (Verbosity.Error >= verbosity) {
+              lastRemote.lazySet(null)
+              out.print(Red)
+              out.print(errorPrefix)
+              msg.foreach(out.print)
+              if (location.file != "")
+                out.println(s" (Logged from ${location.file}:${location.line})")
+              else
+                out.println("")
+              out.print(errorIndent)
+              val squashed = err.squash
+              out.println(squashed)
+              squashed.getStackTrace.foreach {
+                el =>
+                  out.print(errorIndent)
+                  out.println(el)
+              }
+              new StringOps(err.prettyPrint).linesWithSeparators.foreach {
+                line =>
+                  out.print(errorIndent)
+                  out.print(line)
+              }
+              out.print(Reset)
             }
-            new StringOps(err.prettyPrint).linesWithSeparators.foreach {
-              line =>
-                out.print(errorIndent)
-                out.print(line)
-            }
-            out.print(Reset)
           }
         }.ignore
 
@@ -140,23 +162,33 @@ package object logging {
             }
           }.ignore
 
-        override def warnSync(msg: String)(implicit location: Location): Unit = printWithPrefixSync(warnPrefix, warnIndent, msg)
+        override def warnSync(msg: String)(implicit location: Location): Unit = {
+          if (Verbosity.Warn >= verbosity) {
+            printWithPrefixSync(warnPrefix, warnIndent, msg)
+          }
+        }
 
         override def warn(msg: String)(implicit location: Location): UIO[Unit] = {
-          lastRemote.lazySet(null)
-          printWithPrefix(warnPrefix, warnIndent, msg)
+          if (Verbosity.Warn >= verbosity) {
+            lastRemote.lazySet(null)
+            printWithPrefix(warnPrefix, warnIndent, msg)
+          }
         }
 
         override def warn(msg: Option[String], err: Throwable)(implicit location: Location): UIO[Unit] = blocking.effectBlocking {
           out.synchronized {
-            lastRemote.lazySet(null)
-            logStackTraceSync(msg, err, warnPrefix, warnIndent)
+            if (Verbosity.Warn >= verbosity) {
+              lastRemote.lazySet(null)
+              logStackTraceSync(msg, err, warnPrefix, warnIndent)
+            }
           }
         }.ignore
 
         override def info(msg: String)(implicit location: Location): UIO[Unit] = {
-          lastRemote.lazySet(null)
-          printWithPrefix(infoPrefix, infoIndent, msg)
+          if (Verbosity.Info >= verbosity) {
+            lastRemote.lazySet(null)
+            printWithPrefix(infoPrefix, infoIndent, msg)
+          }
         }
 
         override def remote(path: String, msg: String): UIO[Unit] = {
@@ -166,6 +198,10 @@ package object logging {
           } else {
             printWithPrefix(remoteIndent, remoteIndent, msg)(Location.Empty)
           }
+        }
+
+        override def setVerbosity(v: Verbosity): Unit = {
+          verbosity = v
         }
       }
     }
